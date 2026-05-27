@@ -8,7 +8,7 @@ int main(int argc, char* argv[]) {
 
     // Camera: slightly above the equatorial (accretion) disk, looking at the BH.
     // Units: geometric (G = c = M = 1), so RS = 2 and the disk spans [6, 24].
-    Vec3 cam_pos(0.0f, -35.0f, 5.0f);
+    Vec3 cam_pos(0.0f, -35.0f, 1.0f);
     Vec3 target  (0.0f,   0.0f, 0.0f);
     Vec3 world_up(0.0f,   0.0f, 1.0f);   // z is the disk normal
 

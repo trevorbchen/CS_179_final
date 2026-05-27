@@ -32,39 +32,73 @@ __host__ __device__ inline float hash01(unsigned int n) {
     return (float)(uhash(n) & 0xFFFFFFu) / (float)0x1000000u;
 }
 
+// Stellar spectral class colors: temp in [0,1] maps red→orange→yellow→white→blue
+__host__ __device__ inline Vec3 star_color(float temp, float brightness) {
+    Vec3 c;
+    if (temp > 0.75f) {                         // O/B: blue-white
+        float t = (temp - 0.75f) / 0.25f;
+        c = Vec3(0.7f + 0.3f*t, 0.85f + 0.15f*t, 1.0f);
+    } else if (temp > 0.50f) {                  // A/F: white-yellow
+        float t = (temp - 0.50f) / 0.25f;
+        c = Vec3(1.0f, 1.0f, 0.6f + 0.4f*t);
+    } else if (temp > 0.25f) {                  // G/K: yellow-orange (sun-like)
+        float t = (temp - 0.25f) / 0.25f;
+        c = Vec3(1.0f, 0.55f + 0.45f*t, 0.05f + 0.55f*t);
+    } else {                                    // M: red giant
+        float t = temp / 0.25f;
+        c = Vec3(0.7f + 0.3f*t, 0.05f + 0.15f*t, 0.0f);
+    }
+    return c * brightness;
+}
+
 // Map an escaped ray direction to a star-field RGB sample.
 // The direction need not be unit length (will be normalized internally).
 __host__ __device__ inline Vec3 sample_skybox(Vec3 dir) {
-    // Map to spherical grid cell
     float len = dir.norm();
     float dx = dir.x / len, dy = dir.y / len, dz = dir.z / len;
 
     float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dy)));  // [0, π]
     float phi   = atan2f(dz, dx) + 3.14159265f;           // [0, 2π]
 
-    const int GRID = 256;
-    int iu = (int)(phi   / (2.0f * 3.14159265f) * (float)GRID) % GRID;
-    int iv = (int)(theta /        3.14159265f    * (float)GRID) % GRID;
-    unsigned int cell = (unsigned int)(iu * GRID + iv);
+    // Milky Way: Gaussian band of scattered light along galactic equator
+    float lat = theta - 1.5707963f;
+    float mw  = expf(-lat * lat * 6.0f);
+    Vec3 color(0.004f + mw * 0.010f, 0.004f + mw * 0.008f, 0.012f + mw * 0.022f);
 
-    // Background: very dim blue-black
-    Vec3 color(0.005f, 0.005f, 0.015f);
-
-    // ~0.3% of cells are stars
-    if (hash01(cell) > 0.997f) {
-        float brightness = 0.4f + 0.6f * hash01(cell + 1000u);
-        float temp       = hash01(cell + 2000u);   // 0=red, 1=blue-white
-        Vec3 star;
-        if (temp > 0.6f) {
-            // Blue-white hot star
-            float t = (temp - 0.6f) / 0.4f;
-            star = Vec3(0.7f + 0.3f*t, 0.85f + 0.15f*t, 1.0f) * brightness;
-        } else {
-            // Yellow-orange cool star
-            float t = temp / 0.6f;
-            star = Vec3(1.0f, 0.5f + 0.45f*t, 0.1f + 0.5f*t) * brightness;
+    // Layer 1: fine dense field (512-grid, ~0.5% density) — faint distant stars
+    {
+        const int G = 512;
+        int iu = (int)(phi / (2.0f * 3.14159265f) * G) % G;
+        int iv = (int)(theta / 3.14159265f * G) % G;
+        unsigned int cell = (unsigned int)(iu * G + iv);
+        if (hash01(cell) > 0.995f) {
+            float b = 0.12f + 0.28f * hash01(cell + 1000u);
+            color = color + star_color(hash01(cell + 2000u), b);
         }
-        color = star;
+    }
+
+    // Layer 2: medium field (256-grid, ~0.8% density) — mid-distance stars
+    {
+        const int G = 256;
+        int iu = (int)(phi / (2.0f * 3.14159265f) * G) % G;
+        int iv = (int)(theta / 3.14159265f * G) % G;
+        unsigned int cell = (unsigned int)(iu * G + iv) + 300000u;
+        if (hash01(cell) > 0.992f) {
+            float b = 0.30f + 0.45f * hash01(cell + 1000u);
+            color = color + star_color(hash01(cell + 2000u), b);
+        }
+    }
+
+    // Layer 3: sparse bright stars (128-grid, ~1% density) — nearby bright stars
+    {
+        const int G = 128;
+        int iu = (int)(phi / (2.0f * 3.14159265f) * G) % G;
+        int iv = (int)(theta / 3.14159265f * G) % G;
+        unsigned int cell = (unsigned int)(iu * G + iv) + 700000u;
+        if (hash01(cell) > 0.990f) {
+            float b = 0.65f + 0.35f * hash01(cell + 1000u);
+            color = color + star_color(hash01(cell + 2000u), b);
+        }
     }
 
     return color;

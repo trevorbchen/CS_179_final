@@ -11,8 +11,8 @@
 struct Vec3 {
     float x, y, z;
 
-    __host__ __device__ Vec3() : x(0), y(0), z(0) {}
-    __host__ __device__ Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
+    __host__ __device__ constexpr Vec3() : x(0), y(0), z(0) {}
+    __host__ __device__ constexpr Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
 
     __host__ __device__ Vec3 operator+(const Vec3& b) const { return {x+b.x, y+b.y, z+b.z}; }
     __host__ __device__ Vec3 operator-(const Vec3& b) const { return {x-b.x, y-b.y, z-b.z}; }

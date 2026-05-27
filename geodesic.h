@@ -30,6 +30,7 @@ static constexpr float R_HORIZON  = RS * 0.51f;    // absorbing boundary
 static constexpr float R_INF      = 500.0f;        // "escaped"
 static constexpr float R_DISK_MIN = 3.0f * RS;     // ISCO = 6M
 static constexpr float R_DISK_MAX = 12.0f * RS;    // outer disk edge
+static constexpr float R_DISK_H   = 0.25f;         // disk half-thickness (slab)
 
 enum class RayOutcome : int {
     ESCAPED  = 0,
@@ -41,6 +42,7 @@ struct TraceResult {
     RayOutcome outcome;
     Vec3  direction;  // final 3-D direction (skybox lookup for ESCAPED)
     float disk_r;     // cylindrical radius at disk crossing
+    float disk_phi;   // azimuth (atan2) at disk crossing, for surface texturing
     int   steps;
 };
 
@@ -137,8 +139,6 @@ __host__ __device__ inline TraceResult trace_geodesic(
     float vr  = vr0;
     float phi = 0.0f;
 
-    Vec3 prev_pos3d = pos;   // for z-sign crossing detection
-
     for (int i = 0; i < params.max_steps; ++i) {
         // Adaptive step: shrink near the BH
         float scale = r / (5.0f * RS);
@@ -149,15 +149,21 @@ __host__ __device__ inline TraceResult trace_geodesic(
 
         Vec3 curr_pos3d = orbital_pos3d(r, phi, e1, e2);
 
-        // --- disk crossing: equatorial plane z = 0 ---
-        if (prev_pos3d.z * curr_pos3d.z < 0.0f) {
-            // Linear interpolation to find the precise crossing position
-            float t = prev_pos3d.z / (prev_pos3d.z - curr_pos3d.z);
-            Vec3  cx = prev_pos3d + (curr_pos3d - prev_pos3d) * t;
-            float disk_r = sqrtf(cx.x*cx.x + cx.y*cx.y);
-            if (disk_r >= R_DISK_MIN && disk_r <= R_DISK_MAX) {
+        // --- accretion disk: opaque slab of half-thickness R_DISK_H ----------
+        // Disk volume = { R_DISK_MIN <= rho <= R_DISK_MAX, |z| <= R_DISK_H }.
+        // The first integration step that lands inside the slab is the opaque
+        // surface hit. Giving the disk thickness keeps it visible exactly
+        // edge-on, where a zero-thickness plane would project to a sub-pixel
+        // line. The integrator/physics is unchanged — this is scene geometry
+        // only. GPU: same per-thread point-in-volume test, no extra divergence.
+        {
+            float rho2 = curr_pos3d.x*curr_pos3d.x + curr_pos3d.y*curr_pos3d.y;
+            if (fabsf(curr_pos3d.z) <= R_DISK_H &&
+                rho2 >= R_DISK_MIN * R_DISK_MIN &&
+                rho2 <= R_DISK_MAX * R_DISK_MAX) {
                 result.outcome   = RayOutcome::DISK;
-                result.disk_r    = disk_r;
+                result.disk_r    = sqrtf(rho2);
+                result.disk_phi  = atan2f(curr_pos3d.y, curr_pos3d.x);
                 result.direction = orbital_dir3d(vr, r, phi, L, e1, e2).normalized();
                 result.steps     = i + 1;
                 return result;
@@ -179,8 +185,6 @@ __host__ __device__ inline TraceResult trace_geodesic(
             result.steps     = i + 1;
             return result;
         }
-
-        prev_pos3d = curr_pos3d;
     }
 
     // Exhausted steps → treat as escaped

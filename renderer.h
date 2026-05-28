@@ -2,6 +2,8 @@
 #include <vector>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
+#include <jpeglib.h>
 #include "camera.h"
 #include "geodesic.h"
 #include "shader.h"
@@ -67,5 +69,43 @@ inline void save_ppm(const Image& img, const char* path) {
         };
         fwrite(rgb, 1, 3, f);
     }
+    fclose(f);
+}
+
+// Write a JPEG image (quality 0-100).
+inline void save_jpg(const Image& img, const char* path, int quality = 95) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "Cannot open %s for writing\n", path); return; }
+
+    // Pack pixels into a contiguous RGB byte buffer.
+    std::vector<unsigned char> buf(img.width * img.height * 3);
+    for (int i = 0; i < img.width * img.height; ++i) {
+        const Vec3& px = img.pixels[i];
+        buf[i * 3 + 0] = (unsigned char)(fminf(px.x, 1.0f) * 255.0f + 0.5f);
+        buf[i * 3 + 1] = (unsigned char)(fminf(px.y, 1.0f) * 255.0f + 0.5f);
+        buf[i * 3 + 2] = (unsigned char)(fminf(px.z, 1.0f) * 255.0f + 0.5f);
+    }
+
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, f);
+
+    cinfo.image_width      = img.width;
+    cinfo.image_height     = img.height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space   = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while (cinfo.next_scanline < cinfo.image_height) {
+        JSAMPROW row = &buf[cinfo.next_scanline * img.width * 3];
+        jpeg_write_scanlines(&cinfo, &row, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
     fclose(f);
 }

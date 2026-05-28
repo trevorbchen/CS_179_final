@@ -9,7 +9,7 @@
 #endif
 
 // -----------------------------------------------------------------------
-// Trevor's module: pixel shading
+// pixel shading
 //
 // Three cases:
 //   CAPTURED → black (inside event horizon)

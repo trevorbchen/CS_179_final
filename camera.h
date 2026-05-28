@@ -8,7 +8,7 @@
 #endif
 
 // -----------------------------------------------------------------------
-// Trevor's module: pinhole camera ray generator
+// pinhole camera ray generator
 // -----------------------------------------------------------------------
 
 struct Ray {
@@ -40,7 +40,11 @@ struct Camera {
         cam.half_h  = tanf(fov_v * 0.5f);
         cam.half_w  = cam.half_h * ((float)w / (float)h);
         cam.forward = (target - pos).normalized();
-        cam.right   = cam.forward.cross(world_up).normalized();
+        // world_up is parallel to forward when looking straight up/down; use y-axis fallback.
+        Vec3 up_hint = (fabsf(cam.forward.dot(world_up)) > 0.999f)
+                       ? Vec3(0.0f, 1.0f, 0.0f)
+                       : world_up;
+        cam.right   = cam.forward.cross(up_hint).normalized();
         cam.up      = cam.right.cross(cam.forward);
         return cam;
     }

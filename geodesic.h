@@ -8,7 +8,7 @@
 #endif
 
 // -----------------------------------------------------------------------
-// Kevin's module: Schwarzschild null-geodesic integrator
+// Schwarzschild null-geodesic integrator
 //
 // Units: G = c = M = 1  →  r_s = 2
 //
@@ -188,3 +188,111 @@ __host__ __device__ inline TraceResult trace_geodesic(
     result.direction = orbital_dir3d(vr, r, phi, L, e1, e2).normalized();
     return result;
 }
+
+// -----------------------------------------------------------------------
+// Debug / instrumented trace (host-only — used by the test suite).
+//
+// Mirrors trace_geodesic() step-for-step but records the full trajectory
+// plus the conserved quantities (E², L) at every sample, and lets the
+// caller widen the escape radius (r_inf) so weak-field rays can be traced
+// over a long enough arc to compare against the asymptotic GR predictions.
+//
+// The integrator math (geodesic_rhs, rk4_step_2d) is reused unchanged.
+// Gated out of device builds: std::vector is host-only.
+// -----------------------------------------------------------------------
+#ifndef __CUDACC__
+#include <vector>
+
+struct TraceSample {
+    float lambda;     // affine parameter
+    float r, vr, phi; // orbital-plane state
+    Vec3  pos;        // 3-D position
+    Vec3  vel;        // 3-D velocity (un-normalized direction)
+    float E2;         // null-condition invariant: vr² + (1−2/r)·L²/r²
+    float Lmeas;      // |pos × vel|  (should equal L for all samples)
+};
+
+struct DebugTrace {
+    RayOutcome               outcome = RayOutcome::ESCAPED;
+    std::vector<TraceSample> samples;   // index 0 is the initial state
+    float                    L      = 0.0f;
+    float                    disk_r  = 0.0f;
+    int                      steps   = 0;
+};
+
+inline TraceSample make_sample(
+    float lambda, float r, float vr, float phi, float L, Vec3 e1, Vec3 e2)
+{
+    TraceSample s;
+    s.lambda = lambda;
+    s.r = r; s.vr = vr; s.phi = phi;
+    s.pos   = orbital_pos3d(r, phi, e1, e2);
+    s.vel   = orbital_dir3d(vr, r, phi, L, e1, e2);
+    s.E2    = vr*vr + (1.0f - 2.0f / r) * (L*L) / (r*r);
+    s.Lmeas = s.pos.cross(s.vel).norm();
+    return s;
+}
+
+inline DebugTrace trace_ray_debug(
+    Vec3 pos, Vec3 dir, GeodesicParams params = {}, float r_inf = R_INF)
+{
+    DebugTrace out;
+
+    float r0          = pos.norm();
+    Vec3  e1          = pos * (1.0f / r0);
+    float vr0         = dir.dot(e1);
+    Vec3  d_perp      = dir - e1 * vr0;
+    float d_perp_mag  = d_perp.norm();
+    float L           = r0 * d_perp_mag;
+    Vec3  e2          = (d_perp_mag > 1e-8f) ? d_perp * (1.0f / d_perp_mag) : Vec3(0,0,0);
+    out.L             = L;
+
+    float r = r0, vr = vr0, phi = 0.0f, lambda = 0.0f;
+    Vec3  prev_pos3d = pos;
+    out.samples.push_back(make_sample(lambda, r, vr, phi, L, e1, e2));
+
+    for (int i = 0; i < params.max_steps; ++i) {
+        float scale = r / (5.0f * RS);
+        float h = (scale < 1.0f) ? params.step_size * scale * scale : params.step_size;
+        if (h < 0.005f) h = 0.005f;
+
+        rk4_step_2d(r, vr, phi, L, h);
+        lambda += h;
+
+        Vec3 curr_pos3d = orbital_pos3d(r, phi, e1, e2);
+
+        // disk crossing (equatorial plane z = 0)
+        if (prev_pos3d.z * curr_pos3d.z < 0.0f) {
+            float t = prev_pos3d.z / (prev_pos3d.z - curr_pos3d.z);
+            Vec3  cx = prev_pos3d + (curr_pos3d - prev_pos3d) * t;
+            float disk_r = sqrtf(cx.x*cx.x + cx.y*cx.y);
+            if (disk_r >= R_DISK_MIN && disk_r <= R_DISK_MAX) {
+                out.outcome = RayOutcome::DISK;
+                out.disk_r  = disk_r;
+                out.steps   = i + 1;
+                out.samples.push_back(make_sample(lambda, r, vr, phi, L, e1, e2));
+                return out;
+            }
+        }
+        if (r <= R_HORIZON) {
+            out.outcome = RayOutcome::CAPTURED;
+            out.steps   = i + 1;
+            out.samples.push_back(make_sample(lambda, r, vr, phi, L, e1, e2));
+            return out;
+        }
+        if (r >= r_inf) {
+            out.outcome = RayOutcome::ESCAPED;
+            out.steps   = i + 1;
+            out.samples.push_back(make_sample(lambda, r, vr, phi, L, e1, e2));
+            return out;
+        }
+
+        out.samples.push_back(make_sample(lambda, r, vr, phi, L, e1, e2));
+        prev_pos3d = curr_pos3d;
+    }
+
+    out.outcome = RayOutcome::ESCAPED;
+    out.steps   = params.max_steps;
+    return out;
+}
+#endif // __CUDACC__

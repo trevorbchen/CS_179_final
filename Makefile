@@ -1,7 +1,20 @@
 CXX      = g++
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -I/opt/homebrew/opt/jpeg-turbo/include
+CXXFLAGS = -O2 -std=c++17 -Wall -Wextra
+LDFLAGS  = -ljpeg
+
+# --- Portable libjpeg-turbo discovery -----------------------------------
+# On macOS the library lives under Homebrew; on Linux it is on the default
+# include/lib search paths (verified: /usr/include/jpeglib.h, -ljpeg).
+# Detect the platform so the same Makefile builds the CPU baseline on both.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  BREW_JPEG := $(shell brew --prefix jpeg-turbo 2>/dev/null)
+  ifneq ($(BREW_JPEG),)
+    CXXFLAGS += -I$(BREW_JPEG)/include
+    LDFLAGS  := -L$(BREW_JPEG)/lib $(LDFLAGS)
+  endif
+endif
 # Add -fopenmp to CXXFLAGS and -lm to LDFLAGS if desired for faster CPU runs.
-LDFLAGS  = -L/opt/homebrew/opt/jpeg-turbo/lib -ljpeg
 
 TARGET  = renderer
 SRCS    = main.cpp

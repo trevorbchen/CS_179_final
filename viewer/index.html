@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schwarzschild Black Hole — CUDA Renderer</title>
+<style>
+  :root { --bg:#0a0b10; --panel:#14161d; --edge:#262a36; --txt:#dfe3ee; --mut:#8a90a2; --accent:#ff7a3c; }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; display:flex; background:var(--bg); color:var(--txt);
+         font:13px/1.4 system-ui,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center;
+           position:relative; background:#000; cursor:grab; user-select:none; }
+  #stage.drag { cursor:grabbing; }
+  #view { max-width:100%; max-height:100%; image-rendering:auto; }
+  #hint { position:absolute; top:10px; left:12px; color:var(--mut); font-size:12px;
+          background:rgba(0,0,0,.35); padding:4px 8px; border-radius:6px; pointer-events:none; }
+  #side { width:300px; background:var(--panel); border-left:1px solid var(--edge);
+          padding:14px; overflow-y:auto; }
+  h1 { font-size:14px; margin:0 0 2px; letter-spacing:.3px; }
+  .sub { color:var(--mut); font-size:11px; margin-bottom:12px; }
+  .stats { display:grid; grid-template-columns:auto auto; gap:2px 10px; margin-bottom:14px;
+           background:#0f1118; border:1px solid var(--edge); border-radius:8px; padding:10px; }
+  .stats b { color:#7fd1ff; font-variant-numeric:tabular-nums; text-align:right; }
+  .stats .fps { color:var(--accent); font-weight:700; }
+  .group { border-top:1px solid var(--edge); padding:11px 0; }
+  .group h2 { font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--mut);
+              margin:0 0 8px; }
+  label { display:flex; justify-content:space-between; align-items:center; margin:7px 0 2px;
+          font-size:12px; }
+  label span:last-child { color:#7fd1ff; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .row { display:flex; gap:6px; flex-wrap:wrap; }
+  button, select { background:#1d2130; color:var(--txt); border:1px solid var(--edge);
+                   border-radius:6px; padding:6px 9px; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.on { background:var(--accent); color:#171008; border-color:var(--accent); font-weight:600; }
+  select { width:100%; }
+  .seg button { flex:1; }
+  .seg button.sel { background:var(--accent); color:#171008; border-color:var(--accent); }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <img id="view" src="/stream" alt="live render">
+    <div id="hint">drag = orbit · wheel = zoom</div>
+  </div>
+
+  <div id="side">
+    <h1>Schwarzschild Black Hole</h1>
+    <div class="sub">Two-pass CUDA renderer · A5000 (sm_86)</div>
+
+    <div class="stats">
+      <span>FPS</span><b class="fps" id="s_fps">–</b>
+      <span>Resolution</span><b id="s_res">–</b>
+      <span>Pass 1 (gravity)</span><b id="s_p1">–</b>
+      <span>Pass 2 (shading)</span><b id="s_p2">–</b>
+      <span>Postprocess</span><b id="s_pp">–</b>
+      <span>GPU total</span><b id="s_tot">–</b>
+    </div>
+
+    <div class="group">
+      <h2>Camera</h2>
+      <label>Field of view <span id="v_fov">55°</span></label>
+      <input type="range" id="fov" min="20" max="110" step="1" value="55">
+      <label>Distance <span id="v_dist">35</span></label>
+      <input type="range" id="dist" min="6" max="120" step="0.5" value="35">
+      <div class="row" style="margin-top:8px"><button id="reset">Reset camera</button>
+        <button id="shot">Screenshot PNG</button></div>
+    </div>
+
+    <div class="group">
+      <h2>Accretion disk</h2>
+      <label>Inner radius <span id="v_rin">6.0</span></label>
+      <input type="range" id="rin" min="2" max="20" step="0.5" value="6">
+      <label>Outer radius <span id="v_rout">24.0</span></label>
+      <input type="range" id="rout" min="8" max="48" step="0.5" value="24">
+      <label>Surface detail (fBm) <span id="v_fbm">0.40</span></label>
+      <input type="range" id="fbm" min="0" max="1" step="0.05" value="0.40">
+    </div>
+
+    <div class="group">
+      <h2>Integration</h2>
+      <label>RK4 step size <span id="v_step">0.40</span></label>
+      <input type="range" id="step" min="0.05" max="1.0" step="0.05" value="0.40">
+      <div class="sub" style="margin:4px 0 0">smaller = more accurate, slower</div>
+    </div>
+
+    <div class="group">
+      <h2>Tone mapping &amp; bloom</h2>
+      <label>Operator</label>
+      <select id="tonemap"><option value="1">ACES (filmic)</option>
+        <option value="0">Reinhard (CPU parity)</option></select>
+      <label style="margin-top:8px">Exposure <span id="v_exp">1.00</span></label>
+      <input type="range" id="exp" min="0.2" max="4" step="0.05" value="1.0">
+      <div class="row" style="margin-top:8px">
+        <button id="bloom" class="on">Bloom: ON</button>
+        <button id="redshift">Doppler: OFF</button>
+      </div>
+      <label style="margin-top:8px">Bloom intensity <span id="v_bi">0.60</span></label>
+      <input type="range" id="bi" min="0" max="2" step="0.05" value="0.60">
+    </div>
+
+    <div class="group">
+      <h2>Internal resolution</h2>
+      <div class="row seg" id="resseg">
+        <button data-s="0.25">0.25×</button>
+        <button data-s="0.5">0.5×</button>
+        <button data-s="1" class="sel">1×</button>
+        <button data-s="2">2×</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ---- client-side scene state (browser owns it; server applies next frame) ----
+const S = { yaw:0, pitch:0.03, dist:35, fov:55,
+            disk_r_min:6, disk_r_max:24, fbm:0.40,
+            step_size:0.40, exposure:1.0,
+            bloom:1, bloom_intensity:0.60, tonemap:1, res_scale:1, redshift:0 };
+
+// Throttled POST of the full state to /control.
+let pending=false;
+function send(extra){
+  const payload = Object.assign({}, S, extra||{});
+  if(pending) return; pending=true;
+  setTimeout(()=>{ pending=false; }, 35);
+  fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify(payload)}).catch(()=>{});
+}
+
+// ---- mouse: drag to orbit, wheel to zoom ----
+const stage=document.getElementById('stage');
+let dragging=false, lx=0, ly=0;
+stage.addEventListener('mousedown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;stage.classList.add('drag');});
+window.addEventListener('mouseup',()=>{dragging=false;stage.classList.remove('drag');});
+window.addEventListener('mousemove',e=>{
+  if(!dragging)return;
+  const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+  S.yaw  += dx*0.006;
+  S.pitch = Math.max(-1.5, Math.min(1.5, S.pitch + dy*0.006));
+  send();
+});
+stage.addEventListener('wheel',e=>{
+  e.preventDefault();
+  S.dist = Math.max(6, Math.min(120, S.dist * (1 + Math.sign(e.deltaY)*0.06)));
+  document.getElementById('dist').value=S.dist; setText('v_dist',S.dist.toFixed(1));
+  send();
+},{passive:false});
+
+// ---- helpers to wire a slider to a state key ----
+function setText(id,t){ document.getElementById(id).textContent=t; }
+function slider(id, key, fmt, after){
+  const el=document.getElementById(id);
+  el.addEventListener('input',()=>{ S[key]=parseFloat(el.value);
+    if(fmt) setText('v_'+id, fmt(S[key])); if(after) after(); send(); });
+}
+slider('fov','fov', v=>v.toFixed(0)+'°');
+slider('dist','dist', v=>v.toFixed(1));
+slider('rin','disk_r_min', v=>v.toFixed(1));
+slider('rout','disk_r_max', v=>v.toFixed(1));
+slider('fbm','fbm', v=>v.toFixed(2));
+slider('step','step_size', v=>v.toFixed(2));
+slider('exp','exposure', v=>v.toFixed(2));
+slider('bi','bloom_intensity', v=>v.toFixed(2));
+
+document.getElementById('tonemap').addEventListener('change',e=>{ S.tonemap=parseInt(e.target.value); send(); });
+
+// ---- buttons ----
+const bloomBtn=document.getElementById('bloom');
+bloomBtn.addEventListener('click',()=>{ S.bloom^=1; bloomBtn.classList.toggle('on',!!S.bloom);
+  bloomBtn.textContent='Bloom: '+(S.bloom?'ON':'OFF'); send(); });
+const rsBtn=document.getElementById('redshift');
+rsBtn.addEventListener('click',()=>{ S.redshift^=1; rsBtn.classList.toggle('on',!!S.redshift);
+  rsBtn.textContent='Doppler: '+(S.redshift?'ON':'OFF'); send(); });   // STRETCH (no effect server-side yet)
+
+document.getElementById('reset').addEventListener('click',()=>{
+  S.yaw=0; S.pitch=0.03; S.dist=35; S.fov=55;
+  document.getElementById('fov').value=55; setText('v_fov','55°');
+  document.getElementById('dist').value=35; setText('v_dist','35.0');
+  send({reset:1});
+});
+
+document.getElementById('shot').addEventListener('click',()=>{
+  const img=document.getElementById('view');
+  const c=document.createElement('canvas');
+  c.width=img.naturalWidth||img.width; c.height=img.naturalHeight||img.height;
+  c.getContext('2d').drawImage(img,0,0);
+  c.toBlob(b=>{ const a=document.createElement('a');
+    a.href=URL.createObjectURL(b); a.download='blackhole.png'; a.click(); },'image/png');
+});
+
+document.querySelectorAll('#resseg button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.querySelectorAll('#resseg button').forEach(x=>x.classList.remove('sel'));
+    b.classList.add('sel'); S.res_scale=parseFloat(b.dataset.s); send();
+  });
+});
+
+// ---- live stats poll ----
+async function poll(){
+  try{
+    const r=await fetch('/stats'); const j=await r.json();
+    setText('s_fps', j.fps.toFixed(1));
+    setText('s_res', j.w+'×'+j.h);
+    setText('s_p1', j.pass1.toFixed(2)+' ms');
+    setText('s_p2', j.pass2.toFixed(3)+' ms');
+    setText('s_pp', j.post.toFixed(3)+' ms');
+    setText('s_tot', j.total.toFixed(2)+' ms');
+  }catch(e){}
+}
+setInterval(poll, 500); poll();
+send();   // push initial state so server + UI agree
+</script>
+</body>
+</html>

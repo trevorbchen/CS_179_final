@@ -32,3 +32,21 @@ struct Vec3 {
 };
 
 __host__ __device__ inline Vec3 operator*(float t, const Vec3& v) { return v * t; }
+
+// -----------------------------------------------------------------------
+// Vec3 <-> CUDA float3 bridges (device build only).
+//
+// The GPU port stores per-pixel results (TerminalState, HDR framebuffer)
+// using CUDA's built-in float3/float4 vector types: they have the natural
+// 12/16-byte layout the hardware expects and let the renderer kernel read
+// the gravity kernel's output with coalesced, aligned loads.  Vec3 keeps
+// the shared host/device math operators used by the physics + shading.
+// These thin wrappers convert between the two without copying semantics.
+//
+// Guarded by __CUDACC__ so the pure-C++ CPU baseline (which never includes
+// the CUDA headers) is completely unaffected.
+// -----------------------------------------------------------------------
+#ifdef __CUDACC__
+__host__ __device__ inline float3 vec3_to_float3(const Vec3& v) { return float3{v.x, v.y, v.z}; }
+__host__ __device__ inline Vec3   float3_to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
+#endif

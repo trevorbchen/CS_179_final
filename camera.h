@@ -61,3 +61,18 @@ struct Camera {
         return ray;
     }
 };
+
+// -----------------------------------------------------------------------
+// MODULE 2 (Trevor): primary camera-ray generation.
+//
+// Free-function wrapper around Camera::generate_ray so that Module 1's
+// gravity kernel can obtain the initial ray for a pixel without reaching
+// into Camera internals.  This is the exact cross-module pattern the TA
+// approved: the function is OWNED by Module 2 (Trevor / camera + shading)
+// but is CALLED from Module 1's gravity_kernel.cu (Kevin).  Keeping it
+// __host__ __device__ lets the CPU reference path and the GPU kernel share
+// one definition, guaranteeing identical primary rays on both sides.
+// -----------------------------------------------------------------------
+__host__ __device__ inline Ray generate_camera_ray(const Camera& cam, int px, int py) {
+    return cam.generate_ray(px, py);
+}

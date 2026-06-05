@@ -1,0 +1,23 @@
+# Build directories
+/build/
+/cmake-build-*/
+
+# CPU baseline build products
+/renderer
+/renderer_cpu
+/renderer_gpu
+*.o
+*.obj
+
+# Test binaries (built from tests/*.cpp / *.cu)
+/tests/test_geodesic
+/tests/test_shading
+/tests/test_cuda_parity
+
+# Render outputs
+output.ppm
+output.jpg
+benchmark_results.csv
+
+# Editor / OS cruft
+.DS_Store

@@ -75,8 +75,15 @@
       <input type="range" id="rin" min="2" max="20" step="0.5" value="6">
       <label>Outer radius <span id="v_rout">24.0</span></label>
       <input type="range" id="rout" min="8" max="48" step="0.5" value="24">
-      <label>Surface detail (fBm) <span id="v_fbm">0.40</span></label>
-      <input type="range" id="fbm" min="0" max="1" step="0.05" value="0.40">
+      <label>Filament intensity <span id="v_fbm">1.00</span></label>
+      <input type="range" id="fbm" min="0" max="1" step="0.05" value="1.00">
+      <label>Disk spin speed <span id="v_spin">1.00</span></label>
+      <input type="range" id="spin" min="0" max="5" step="0.05" value="1.00">
+      <label>Spiral tightness <span id="v_wind">8.0</span></label>
+      <input type="range" id="wind" min="0" max="24" step="0.5" value="8.0">
+      <div class="row" style="margin-top:8px">
+        <button id="play" class="on">Animation: PLAYING</button>
+      </div>
     </div>
 
     <div class="group">
@@ -115,7 +122,8 @@
 <script>
 // ---- client-side scene state (browser owns it; server applies next frame) ----
 const S = { yaw:0, pitch:0.03, dist:35, fov:55,
-            disk_r_min:6, disk_r_max:24, fbm:0.40,
+            disk_r_min:6, disk_r_max:24, fbm:1.0,
+            disk_spin_speed:1.0, spiral_wind:8.0, paused:0,
             step_size:0.40, exposure:1.0,
             bloom:1, bloom_intensity:0.60, tonemap:1, res_scale:1, redshift:0 };
 
@@ -160,6 +168,8 @@ slider('dist','dist', v=>v.toFixed(1));
 slider('rin','disk_r_min', v=>v.toFixed(1));
 slider('rout','disk_r_max', v=>v.toFixed(1));
 slider('fbm','fbm', v=>v.toFixed(2));
+slider('spin','disk_spin_speed', v=>v.toFixed(2));
+slider('wind','spiral_wind', v=>v.toFixed(1));
 slider('step','step_size', v=>v.toFixed(2));
 slider('exp','exposure', v=>v.toFixed(2));
 slider('bi','bloom_intensity', v=>v.toFixed(2));
@@ -173,6 +183,11 @@ bloomBtn.addEventListener('click',()=>{ S.bloom^=1; bloomBtn.classList.toggle('o
 const rsBtn=document.getElementById('redshift');
 rsBtn.addEventListener('click',()=>{ S.redshift^=1; rsBtn.classList.toggle('on',!!S.redshift);
   rsBtn.textContent='Doppler: '+(S.redshift?'ON':'OFF'); send(); });   // STRETCH (no effect server-side yet)
+
+// Play/pause the disk-filament animation (freezes the server-side time clock).
+const playBtn=document.getElementById('play');
+playBtn.addEventListener('click',()=>{ S.paused^=1; playBtn.classList.toggle('on',!S.paused);
+  playBtn.textContent='Animation: '+(S.paused?'PAUSED':'PLAYING'); send(); });
 
 document.getElementById('reset').addEventListener('click',()=>{
   S.yaw=0; S.pitch=0.03; S.dist=35; S.fov=55;

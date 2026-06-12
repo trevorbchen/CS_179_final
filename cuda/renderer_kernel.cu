@@ -27,46 +27,47 @@ __device__ __forceinline__ float4 make_hdr(const Vec3& c) {
 }
 
 // ----------------------------------------------------------------------------
-// Procedural fBm for accretion-disk surface detail (Module 2 enhancement).
-//
-// Value-noise summed over a few octaves, keyed on (azimuth, radius) so it
-// forms turbulent orbital bands. Deterministic — reuses shader.h's integer
-// hash (hash01) so it is CUDA-safe and frame-stable. Returns ~[0,1].
-// Disabled (strength 0) for CPU parity; the gravity/shading math is untouched.
+// NOTE: the accretion-disk surface texture now lives in shader.h as the shared
+// __host__ __device__ helpers disk_fbm3() / disk_value_noise3() and the filament
+// shader shade_disk_filaments() (the "Interstellar" thin-filament look). The
+// noise is sampled on a ring (cos/sin of the azimuth) so there is no atan2
+// branch-cut seam. Keeping it in shader.h gives one source of truth for the CPU
+// reference and the GPU path, and the parity config (disk_fbm_strength = 0)
+// still reproduces the flat blackbody disk exactly. The earlier GPU-only fBm
+// bands lived here.
 // ----------------------------------------------------------------------------
-__device__ __forceinline__ float hash2(int a, int b) {
-    return hash01((unsigned int)(a * 73856093) ^ (unsigned int)(b * 19349663));
-}
-__device__ float value_noise(float x, float y) {
-    int   xi = (int)floorf(x), yi = (int)floorf(y);
-    float xf = x - xi,         yf = y - yi;
-    float u = xf * xf * (3.0f - 2.0f * xf);   // smoothstep fade
-    float v = yf * yf * (3.0f - 2.0f * yf);
-    float a = hash2(xi,     yi);
-    float b = hash2(xi + 1, yi);
-    float c = hash2(xi,     yi + 1);
-    float d = hash2(xi + 1, yi + 1);
-    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-}
-__device__ float disk_fbm(float disk_r, float disk_phi) {
-    // Wrap azimuth so the noise is seamless around the ring; stretch along phi.
-    float x = disk_phi * 3.0f;
-    float y = disk_r   * 0.6f;
-    float sum = 0.0f, amp = 0.5f, freq = 1.0f;
-    for (int o = 0; o < 4; ++o) {
-        sum  += amp * value_noise(x * freq, y * freq);
-        freq *= 2.0f;
-        amp  *= 0.5f;
-    }
-    return sum;   // ~[0,1)
-}
+// RELATIVISTIC SHADING TUNING (Module 2; the geodesics in Module 1 are not
+// involved — everything here derives from the TerminalState alone).
+//
+// Doppler beaming + gravitational redshift for the Keplerian disk flow:
+//   beta    = 1/sqrt(r - 2)        orbital speed measured by a static observer
+//                                  (Schwarzschild circular orbit, G=c=M=1; 0.5c
+//                                  at the ISCO r=6)
+//   delta   = 1 / (gamma (1 - beta cos a))   special-relativistic Doppler,
+//                                  a = angle between flow and the photon
+//                                  direction toward the camera (-hit_dir)
+//   g_grav  = sqrt(1 - 2/r)        climb out of the potential well
+//   g       = delta * g_grav       total observed frequency ratio
+// Applied as: temperature x g (hue slides along the Planck ramp — approaching
+// side toward white/blue, receding toward deep red) and brightness x g^3
+// (frequency-integrated beaming; g^4 is the bolometric result but reads as
+// pure black/white clipping after tone mapping). doppler_strength lerps both
+// toward neutral so 0 is EXACTLY off (the parity configuration).
+// ----------------------------------------------------------------------------
+static constexpr float DOPPLER_BETA_MAX   = 0.90f; // velocity clamp (the r_min slider can reach r ~ 2)
+static constexpr float DOPPLER_BRIGHT_EXP = 2.5f;  // beaming exponent on brightness (3 is the frequency-integrated
+                                                   // result; 2.5 keeps the receding side readable after tone mapping)
 
 // ----------------------------------------------------------------------------
 // Equirectangular skybox texture sample (hardware bilinear via texture object).
 // Matches sample_skybox()'s direction->(theta,phi) convention so swapping the
 // procedural field for a real texture only changes the source of the color.
+// The JPEG texels are sRGB-encoded; they are linearized (gamma 2.2) here so the
+// HDR pipeline + tonemap treat the sky correctly (raw texels rendered as linear
+// washed the Milky Way out to grey). sky_brightness is the GUI exposure trim.
 // ----------------------------------------------------------------------------
-__device__ Vec3 sample_skybox_texture(cudaTextureObject_t tex, Vec3 dir) {
+__device__ Vec3 sample_skybox_texture(cudaTextureObject_t tex, Vec3 dir,
+                                      float sky_brightness) {
     float len = dir.norm();
     float dx = dir.x / len, dy = dir.y / len, dz = dir.z / len;
     float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dy)));     // [0, pi]
@@ -74,40 +75,67 @@ __device__ Vec3 sample_skybox_texture(cudaTextureObject_t tex, Vec3 dir) {
     float u = phi   / (2.0f * 3.14159265f);
     float v = theta / 3.14159265f;
     float4 t = tex2D<float4>(tex, u, v);                    // free bilinear filtering
-    return Vec3(t.x, t.y, t.z);
+    return Vec3(powf(t.x, 2.2f), powf(t.y, 2.2f), powf(t.z, 2.2f)) * sky_brightness;
 }
 
 // ----------------------------------------------------------------------------
 // Shade a single TerminalState into a linear HDR color.
 // ----------------------------------------------------------------------------
 __device__ Vec3 shade_terminal(const TerminalState& st, const RenderParams& rp,
-                               cudaTextureObject_t skybox_tex)
+                               float time_seconds, cudaTextureObject_t skybox_tex)
 {
     switch (st.hit_type) {
         case HIT_CAPTURED:
             return Vec3(0.0f, 0.0f, 0.0f);
 
         case HIT_DISK: {
-            Vec3 base = shade_disk(st.disk_r);              // shader.h blackbody gradient
-            if (rp.disk_fbm_strength > 0.0f) {
-                float n = disk_fbm(st.disk_r, st.disk_phi); // ~[0,1]
-                float m = 1.0f + rp.disk_fbm_strength * (2.0f * n - 1.0f);
-                base = base * fmaxf(0.0f, m);
+            Vec3 plain = shade_disk(st.disk_r);             // shader.h blackbody gradient
+            float k = rp.disk_fbm_strength;                 // filament intensity / blend
+
+            // Relativistic factors (neutral 1,1 at strength 0 -> parity path
+            // bit-identical). See the tuning block above for the math.
+            float g_shift = 1.0f, g_bright = 1.0f;
+            if (rp.doppler_strength > 0.0f) {
+                float r     = fmaxf(st.disk_r, 2.05f);
+                float beta  = fminf(1.0f / sqrtf(r - 2.0f), DOPPLER_BETA_MAX);
+                float gamma = 1.0f / sqrtf(1.0f - beta * beta);
+                // Flow direction +phi-hat (counterclockwise from +z), the same
+                // sense the filament animation streams.
+                float cp = cosf(st.disk_phi), sp = sinf(st.disk_phi);
+                Vec3 flow(-sp, cp, 0.0f);
+                // Photon propagation direction toward the camera = reversed
+                // backward-trace direction at the crossing.
+                Vec3 n = float3_to_vec3(st.hit_dir) * -1.0f;
+                float doppler = 1.0f / (gamma * (1.0f - beta * flow.dot(n)));
+                float g = doppler * sqrtf(fmaxf(1.0f - 2.0f / r, 0.03f));
+                g_shift  = 1.0f + (g - 1.0f) * rp.doppler_strength;
+                g_bright = powf(g, DOPPLER_BRIGHT_EXP * rp.doppler_strength);
+                plain = plain * g_bright;   // flat disk gets the beaming too
             }
-            return base;
+            if (k <= 0.0f) return plain;                    // flat disk (exact CPU parity)
+
+            // Sheared multi-scale filaments (the "Interstellar" look), animated
+            // by time; volumetric Gaussian slab when thickness > 0.
+            Vec3 fil = (rp.disk_thickness > 0.0f)
+                ? shade_disk_slab(float3_to_vec3(st.hit_pos), float3_to_vec3(st.hit_dir),
+                                  rp.disk_thickness, time_seconds,
+                                  rp.disk_spin_speed, rp.spiral_wind, rp.disk_detail,
+                                  rp.disk_r_min, rp.disk_r_max, g_shift, g_bright)
+                : shade_disk_filaments(st.disk_r, st.disk_phi, time_seconds,
+                                       rp.disk_spin_speed, rp.spiral_wind, rp.disk_detail,
+                                       rp.disk_r_min, rp.disk_r_max, g_shift, g_bright);
+            if (k >= 1.0f) return fil;
+            return plain * (1.0f - k) + fil * k;            // blend flat <-> filaments
         }
 
         case HIT_ESCAPED:
         default: {
             Vec3 dir = float3_to_vec3(st.hit_dir);
             if (rp.use_skybox_texture)
-                return sample_skybox_texture(skybox_tex, dir);
+                return sample_skybox_texture(skybox_tex, dir, rp.sky_brightness);
             return sample_skybox(dir);                      // procedural (CPU parity)
         }
     }
-    // STRETCH: gravitational redshift / relativistic Doppler boost of the disk
-    // color would be applied here using hit_dir and the local Keplerian
-    // velocity. Left out per scope (two-pass parity first).
 }
 
 // ----------------------------------------------------------------------------
@@ -115,14 +143,15 @@ __device__ Vec3 shade_terminal(const TerminalState& st, const RenderParams& rp,
 // ----------------------------------------------------------------------------
 __global__ void renderer_kernel(const TerminalState* __restrict__ states,
                                float4* __restrict__ hdr, int W, int H,
-                               RenderParams rp, cudaTextureObject_t skybox_tex)
+                               RenderParams rp, float time_seconds,
+                               cudaTextureObject_t skybox_tex)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= W || y >= H) return;
 
     int idx = y * W + x;
-    Vec3 color = shade_terminal(states[idx], rp, skybox_tex);
+    Vec3 color = shade_terminal(states[idx], rp, time_seconds, skybox_tex);
     hdr[idx] = make_hdr(color);
 }
 
@@ -131,11 +160,13 @@ __global__ void renderer_kernel(const TerminalState* __restrict__ states,
 // ----------------------------------------------------------------------------
 void launch_renderer_kernel(const TerminalState* d_states, float4* d_hdr,
                             int W, int H, const RenderParams& rp,
+                            float time_seconds,
                             cudaTextureObject_t skybox_tex,
                             int /*sky_w*/, int /*sky_h*/, cudaStream_t stream)
 {
     dim3 block(16, 16);
     dim3 grid(div_up(W, block.x), div_up(H, block.y));
-    renderer_kernel<<<grid, block, 0, stream>>>(d_states, d_hdr, W, H, rp, skybox_tex);
+    renderer_kernel<<<grid, block, 0, stream>>>(d_states, d_hdr, W, H, rp,
+                                                time_seconds, skybox_tex);
     CUDA_CHECK_KERNEL();
 }

@@ -56,6 +56,7 @@ struct Shared {
     double res_scale = 1.0;
     int    quality = 85;
     bool   redshift = false;     // STRETCH placeholder (no effect yet)
+    bool   paused   = false;     // freeze the disk-filament animation clock
     // Outputs (produced by the render loop).
     std::vector<uint8_t> jpeg;
     FrameTimings t;
@@ -195,10 +196,10 @@ static int run_once(int W, int H, const std::string& out, const std::string& sky
     RenderParams rp;
     rp.tonemap = ToneMap::ACES;
     rp.bloom_enabled = true; rp.bloom_intensity = 0.6f;
-    rp.disk_fbm_strength = 0.4f;
+    rp.disk_fbm_strength = 1.0f;            // full thin-filament disk
     rp.use_skybox_texture = sky;
     Camera cam = make_camera(0.0, 0.03, 35.0, 55.0, Vec3(0,0,0), W, H);
-    gpu.render_frame(cam, rp);
+    gpu.render_frame(cam, rp, 0.0f);        // static frame (t=0)
     const uint32_t* ldr = gpu.read_ldr();
     std::vector<uint8_t> jpeg = encode_jpeg_rgba(ldr, W, H, 92);
     FILE* f = std::fopen(out.c_str(), "wb");
@@ -251,6 +252,9 @@ static int run_server(Shared& sh, int port, const std::string& skybox) {
         if (json_num(body, "disk_r_min", v))     sh.rp.disk_r_min = (float)v;
         if (json_num(body, "disk_r_max", v))     sh.rp.disk_r_max = (float)v;
         if (json_num(body, "fbm", v))            sh.rp.disk_fbm_strength = (float)v;
+        if (json_num(body, "disk_spin_speed", v))sh.rp.disk_spin_speed = (float)std::fmax(0.0, v);
+        if (json_num(body, "spiral_wind", v))    sh.rp.spiral_wind = (float)std::fmax(0.0, v);
+        if (json_num(body, "paused", v))         sh.paused = (v != 0);
         if (json_num(body, "step_size", v))      sh.rp.geo.step_size = (float)std::fmax(0.02, v);
         if (json_num(body, "exposure", v))       sh.rp.exposure = (float)v;
         if (json_num(body, "bloom", v))          sh.rp.bloom_enabled = (v != 0);
@@ -270,21 +274,33 @@ static int run_server(Shared& sh, int port, const std::string& skybox) {
     // ---- render loop (main thread owns the CUDA context) ----
     const double target_ms = 1000.0 / 60.0;   // cap ~60 fps
     double fps_ema = 0.0;
+    // Disk-filament animation clock: advanced by REAL wall-clock elapsed time per
+    // frame, so the filaments stream at the same rate regardless of frame rate.
+    // Frozen while paused.
+    double anim_seconds = 0.0;
+    auto   anim_prev    = std::chrono::high_resolution_clock::now();
     while (sh.running) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
+        // Advance the animation clock by real elapsed time (unless paused).
+        double anim_dt = std::chrono::duration<double>(t0 - anim_prev).count();
+        anim_prev = t0;
+
         double yaw, pitch, dist, fov, scale; Vec3 target; RenderParams rp; int bw, bh, q;
+        bool paused;
         {
             std::lock_guard<std::mutex> lk(sh.m);
             yaw = sh.yaw; pitch = sh.pitch; dist = sh.dist; fov = sh.fov;
             target = sh.target; rp = sh.rp; scale = sh.res_scale;
-            bw = sh.base_w; bh = sh.base_h; q = sh.quality;
+            bw = sh.base_w; bh = sh.base_h; q = sh.quality; paused = sh.paused;
         }
+        if (!paused) anim_seconds += anim_dt;
+
         int W = std::max(16, (int)std::lround(bw * scale));
         int H = std::max(16, (int)std::lround(bh * scale));
         Camera cam = make_camera(yaw, pitch, dist, fov, target, W, H);
 
-        gpu.render_frame(cam, rp);
+        gpu.render_frame(cam, rp, (float)anim_seconds);
         const uint32_t* ldr = gpu.read_ldr();
         std::vector<uint8_t> jpeg = encode_jpeg_rgba(ldr, W, H, q);
         FrameTimings t = gpu.timings();
@@ -314,7 +330,7 @@ int main(int argc, char** argv) {
     int  base_w = 800, base_h = 600, port = 8080, bench_n = 100;
     bool do_bench = false, bench_fast = false, do_glfw = false, do_once = false;
     std::string once_out = "frame.jpg";
-    std::string skybox = std::string(PROJECT_SOURCE_DIR_STR) + "/data/skybox.jpg";
+    std::string skybox = std::string(PROJECT_SOURCE_DIR_STR) + "/milkyway.jpg";
 
     // Positional WxH first (two integers), then flags.
     int pos = 1;
@@ -358,6 +374,6 @@ int main(int argc, char** argv) {
     sh.base_w = base_w; sh.base_h = base_h;
     sh.rp.tonemap = ToneMap::ACES;          // pretty interactive defaults
     sh.rp.bloom_enabled = true; sh.rp.bloom_intensity = 0.6f;
-    sh.rp.disk_fbm_strength = 0.4f;
+    sh.rp.disk_fbm_strength = 1.0f;         // full thin-filament accretion disk
     return run_server(sh, port, skybox);
 }

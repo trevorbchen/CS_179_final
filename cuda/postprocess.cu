@@ -37,9 +37,15 @@ __device__ __forceinline__ uint32_t pack_rgba(float r, float g, float b) {
     return R | (G << 8) | (B << 16) | (0xFFu << 24);
 }
 
+// vignette: subtle filmic corner falloff applied to the LINEAR color before
+// the tonemap curve (so it behaves like lens light falloff, not a grey wash).
+// Quartic in the normalized center distance: imperceptible at the center,
+// reaching a factor of (1 - vignette) in the extreme corners. 0 = exactly off
+// (the parity configuration).
 __global__ void tonemap_kernel(const float4* __restrict__ hdr,
                                uint32_t* __restrict__ ldr,
-                               int W, int H, ToneMap tm, float exposure)
+                               int W, int H, ToneMap tm, float exposure,
+                               float vignette)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -47,18 +53,62 @@ __global__ void tonemap_kernel(const float4* __restrict__ hdr,
 
     int idx = y * W + x;
     float4 c = hdr[idx];
-    float r = tonemap_channel(c.x * exposure, tm);
-    float g = tonemap_channel(c.y * exposure, tm);
-    float b = tonemap_channel(c.z * exposure, tm);
+    float e = exposure;
+    if (vignette > 0.0f) {
+        float u = ((float)x + 0.5f) / W * 2.0f - 1.0f;
+        float v = ((float)y + 0.5f) / H * 2.0f - 1.0f;
+        float d2 = u * u + v * v;                       // 0 center .. 2 corners
+        e *= fmaxf(1.0f - vignette * d2 * d2 * 0.25f, 0.0f);
+    }
+    float r = tonemap_channel(c.x * e, tm);
+    float g = tonemap_channel(c.y * e, tm);
+    float b = tonemap_channel(c.z * e, tm);
     ldr[idx] = pack_rgba(r, g, b);
 }
 
 void launch_tonemap(const float4* d_hdr, uint32_t* d_ldr, int W, int H,
-                    ToneMap tm, float exposure, cudaStream_t stream)
+                    ToneMap tm, float exposure, float vignette,
+                    cudaStream_t stream)
 {
     dim3 block(16, 16);
     dim3 grid(div_up(W, block.x), div_up(H, block.y));
-    tonemap_kernel<<<grid, block, 0, stream>>>(d_hdr, d_ldr, W, H, tm, exposure);
+    tonemap_kernel<<<grid, block, 0, stream>>>(d_hdr, d_ldr, W, H, tm, exposure,
+                                               vignette);
+    CUDA_CHECK_KERNEL();
+}
+
+// =============================================================================
+// SSAA box-downsample: each output pixel is the mean of its ss x ss block of
+// supersampled HDR texels. Runs BEFORE bloom/tonemap so (a) the streamed JPEG
+// stays at output resolution and (b) the bloom sigmas keep the same apparent
+// width regardless of the SSAA factor.
+// =============================================================================
+__global__ void downsample_kernel(const float4* __restrict__ hi,
+                                  float4* __restrict__ lo,
+                                  int W, int H, int ss)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= W || y >= H) return;
+
+    int Wi = W * ss;
+    float inv = 1.0f / (ss * ss);
+    float3 acc{0.0f, 0.0f, 0.0f};
+    for (int sy = 0; sy < ss; ++sy) {
+        const float4* row = hi + (size_t)(y * ss + sy) * Wi + (size_t)x * ss;
+        for (int sx = 0; sx < ss; ++sx) {
+            acc.x += row[sx].x; acc.y += row[sx].y; acc.z += row[sx].z;
+        }
+    }
+    lo[y * W + x] = float4{acc.x * inv, acc.y * inv, acc.z * inv, 1.0f};
+}
+
+void launch_downsample(const float4* d_hi, float4* d_lo, int W, int H, int ss,
+                       cudaStream_t stream)
+{
+    dim3 block(16, 16);
+    dim3 grid(div_up(W, block.x), div_up(H, block.y));
+    downsample_kernel<<<grid, block, 0, stream>>>(d_hi, d_lo, W, H, ss);
     CUDA_CHECK_KERNEL();
 }
 

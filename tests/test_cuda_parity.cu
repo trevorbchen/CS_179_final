@@ -35,7 +35,8 @@ static void gpu_render_parity(const Camera& cam, std::vector<uint32_t>& ldr) {
     RenderParams rp;                       // defaults == CPU parity config
     GeodesicParams gp = rp.geo;
     launch_gravity_kernel(cam, gp, rp.disk_r_min, rp.disk_r_max, d_states, W, H);
-    launch_renderer_kernel(d_states, d_hdr, W, H, rp, /*tex*/0, 0, 0);
+    // time_seconds = 0 (static); rp defaults leave filaments off -> flat disk == CPU.
+    launch_renderer_kernel(d_states, d_hdr, W, H, rp, /*time*/0.0f, /*tex*/0, 0, 0);
     launch_tonemap(d_hdr, d_ldr, W, H, ToneMap::Reinhard, rp.exposure);
     CUDA_CHECK(cudaDeviceSynchronize());
 
